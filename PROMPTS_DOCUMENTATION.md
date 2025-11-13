@@ -102,3 +102,52 @@ DO NOT include any text outside of the JSON array, just return valid JSON:
 
 ---
 
+## Промпты для математических задач
+
+### 4. AIME Mathematical Problem Solver System Prompt
+
+**Расположение:** `tests/utils/aime_eval.py:116-118`
+
+**Назначение:** System prompt для решения математических задач из датасета AIME (American Invitational Mathematics Examination). Инструктирует модель решать задачи пошагово и четко предоставлять финальный ответ.
+
+**Промпт:**
+```
+You are a mathematical problem solver. Solve the given problem step by step and provide your final answer clearly.
+```
+
+**Использование:**
+- Используется как system message в массиве промптов
+- Применяется для задач из combined AIME dataset (test2024 + test2025-I + test2025-II)
+- Ожидается численный ответ в диапазоне 0-999
+
+---
+
+### 5. AIME Problem User Prompt Template
+
+**Расположение:** `tests/utils/aime_eval.py:121`
+
+**Назначение:** User prompt для представления математической задачи модели. Запрашивает пошаговое решение и финальный численный ответ.
+
+**Промпт:**
+```
+Problem: {problem}
+
+Solve this step by step and provide your final numerical answer.
+```
+
+**Параметры:**
+- `{problem}` - текст математической задачи из датасета
+
+**Конфигурация оценки:**
+- Temperature: 0.3 (по умолчанию)
+- n_sampling: 8 (количество попыток на задачу)
+- max_tokens: 32768
+- top_p: 0.95
+- Используется Pass@k метрика для оценки
+
+**Формат ответа:**
+- Извлекаются числа от 0 до 999
+- Поддерживаются паттерны: "The answer is X", "\\boxed{X}", standalone numbers
+
+---
+
