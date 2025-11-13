@@ -1032,3 +1032,204 @@ vision_model/
 
 ---
 
+## Сводная информация
+
+### Сравнение пайплайнов
+
+| Пайплайн | Тип | Основная задача | Ключевая метрика | Модель |
+|----------|-----|-----------------|------------------|--------|
+| Synthetic Data | Генерация данных | Создание QA пар из документов | Quality Rating (1-10) | Llama-3.1-8B-Instruct |
+| AIME Evaluation | Оценка | Математические задачи | Accuracy, Pass@k | Any LLM |
+| Training (GSM8K/LIMO) | Обучение | Математическое рассуждение | AIME Accuracy | Llama-3.2-3B-Instruct |
+| Vision OCR | Обучение + Оценка | Распознавание текста | WER, CER | Qwen2-VL-7B-Instruct |
+
+### Общие паттерны
+
+#### 1. Инициализация моделей
+
+Все пайплайны используют похожую схему инициализации:
+
+```
+Load Model ──> Configure ──> Setup LoRA (опционально) ──> Training/Inference
+```
+
+**Общие параметры:**
+- `max_seq_length`: 2048-32768
+- `gpu_memory_utilization`: 0.8-0.98
+- `load_in_4bit`: True/False (в зависимости от задачи)
+- `fast_inference`: True (для vLLM)
+
+#### 2. Промпт-форматирование
+
+Стандартная структура промптов (OpenAI format):
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."}
+  ]
+}
+```
+
+#### 3. Evaluation Pattern
+
+Общая схема оценки:
+
+```
+Load Dataset ──> Format ──> Generate ──> Extract Answer ──> Calculate Metrics ──> Save Results
+```
+
+#### 4. LoRA Training Pattern
+
+```
+Base Model ──> Apply LoRA ──> Train ──> Evaluate ──> Save (adapters/merged)
+```
+
+**Стандартные LoRA параметры:**
+- Language models: r=64, alpha=128
+- Vision models: r=16, alpha=32
+- lora_dropout: 0
+- bias: "none"
+
+### Взаимосвязи пайплайнов
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     PIPELINE INTERACTIONS                    │
+└─────────────────────────────────────────────────────────────┘
+
+Synthetic Data Pipeline
+         │
+         └──> Generates training data
+                    │
+                    v
+         Training Pipeline (GSM8K/LIMO)
+                    │
+                    └──> Trained model
+                              │
+                              v
+                    AIME Evaluation Pipeline
+                              │
+                              └──> Performance metrics
+
+Vision OCR Pipeline (независимый)
+         │
+         └──> Специализированный на multimodal данных
+```
+
+### Конфигурационные файлы
+
+**1. Synthetic Data:**
+- `synthetic_data_kit_config.yaml` - генерируется автоматически
+- Содержит paths, generation params, cleanup config
+
+**2. Training:**
+- Конфигурация встроена в код
+- SFTConfig / GRPOConfig объекты
+
+**3. Evaluation:**
+- Параметры передаются как аргументы функций
+- Результаты сохраняются в JSON
+
+### Метрики по пайплайнам
+
+**Synthetic Data:**
+- Quality rating: 1-10 (threshold обычно 1.0+)
+- Количество сгенерированных пар
+
+**AIME:**
+- Accuracy: % правильных ответов
+- Pass@k: % задач с >= 1 правильным из k попыток
+- Токенная статистика
+
+**Training:**
+- AIME improvement: разница до/после обучения
+- Format compliance: % ответов с правильными тегами
+
+**Vision OCR:**
+- WER: Word Error Rate (lower is better)
+- CER: Character Error Rate (lower is better)
+
+### Временные характеристики
+
+| Пайплайн | Типичное время | Факторы |
+|----------|----------------|---------|
+| Synthetic Data | 1-5 мин/документ | Размер документа, num_pairs |
+| AIME Evaluation | 10-30 мин | Количество задач, n_sampling |
+| Training (GRPO) | 1-4 часа | Dataset size, num_epochs |
+| Vision OCR | 30-60 мин | Training steps, batch_size |
+
+### Требования к памяти
+
+| Пайплайн | GPU Memory | Оптимизации |
+|----------|------------|-------------|
+| Synthetic Data | 16-24 GB | vLLM, 4-bit quantization |
+| AIME Evaluation | 16-40 GB | Зависит от модели |
+| Training (LoRA) | 24-40 GB | Gradient checkpointing, small batch |
+| Vision OCR | 40-80 GB | Vision требует больше памяти |
+
+### Форматы выходных данных
+
+**JSON (результаты оценки):**
+```json
+{
+  "results": {
+    "accuracy": 0.45,
+    "metric": "value"
+  },
+  "records": {
+    "task_id": {
+      "input": "...",
+      "output": "...",
+      "correct": true
+    }
+  }
+}
+```
+
+**JSONL (обучающие данные):**
+```jsonl
+{"messages": [...], "answer": "..."}
+{"messages": [...], "answer": "..."}
+```
+
+**YAML (конфигурации):**
+```yaml
+paths:
+  input: "data/input"
+  output: "data/output"
+generation:
+  temperature: 0.7
+  max_tokens: 512
+```
+
+### Лучшие практики
+
+1. **Synthetic Data Generation:**
+   - Используйте overlap для сохранения контекста
+   - Применяйте cleanup с порогом для качества
+   - Batch размер 4 для рейтинга оптимален
+
+2. **AIME Evaluation:**
+   - n_sampling=8 для надежных Pass@k метрик
+   - temperature=0.3 для математических задач
+   - Seed для воспроизводимости
+
+3. **Training:**
+   - Начинайте с SFT, затем GRPO
+   - Используйте GRPO для улучшения формата
+   - Валидируйте на AIME после каждой эпохи
+
+4. **Vision OCR:**
+   - Базовая оценка перед обучением обязательна
+   - Используйте меньший LoRA rank (16 vs 64)
+   - Gradient checkpointing для экономии памяти
+
+---
+
+**Дата создания:** 2025-11-13
+**Всего пайплайнов:** 4
+**Версия документации:** 1.0
+
