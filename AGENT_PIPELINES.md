@@ -415,3 +415,293 @@ OUTPUT: aime_model_comparison.json
 
 ---
 
+## Training Pipeline (GSM8K/LIMO)
+
+### Описание
+Пайплайн для обучения языковых моделей на математических датасетах GSM8K и LIMO с использованием GRPO (Group Relative Policy Optimization). Включает форматирование данных, обучение с LoRA, оценку и сохранение моделей.
+
+### Компоненты
+
+**Расположение:** `tests/saving/language_models/test_save_merged_grpo_model.py`
+**Методы обучения:** SFT (Supervised Fine-Tuning), GRPO
+**Датасеты:** GSM8K, LIMO
+
+### Схема работы
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    TRAINING PIPELINE (GSM8K/LIMO)                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+1. ИНИЦИАЛИЗАЦИЯ МОДЕЛИ
+   ┌──────────────────────────────┐
+   │ FastLanguageModel.from_      │
+   │       pretrained             │
+   └──────────┬───────────────────┘
+              │
+              ├─> Загрузка base модели
+              │   - model_name: "meta-llama/Llama-3.2-3B-Instruct"
+              │   - max_seq_length: 2048
+              │   - load_in_4bit: False (для LoRA 16bit)
+              │   - fast_inference: True (vLLM)
+              │
+              └─> Конфигурация:
+                  - max_lora_rank: 64
+                  - gpu_memory_utilization: 0.8
+
+2. ПОДГОТОВКА GSM8K ДАТАСЕТА
+   ┌─────────────────────────┐
+   │ prepare_gsm8k_dataset   │
+   └──────┬──────────────────┘
+          │
+          ├─> Загрузка dataset
+          │
+          ├─> Применение system prompt:
+          │   "You are given a problem. Think about the problem
+          │    and reason step by step. Place your thinking
+          │    process between <reasoning> and </reasoning>.
+          │    Then, provide your final numerical solution
+          │    between <answer></answer>"
+          │
+          └─> Форматирование:
+              {
+                "prompt": [
+                  {"role": "system", "content": system_prompt},
+                  {"role": "user", "content": question}
+                ],
+                "answer": extracted_answer  # from "#### 123" format
+              }
+
+3. ПОДГОТОВКА LIMO ДАТАСЕТА
+   ┌─────────────────────────┐
+   │ prepare_limo_dataset    │
+   └──────┬──────────────────┘
+          │
+          ├─> Загрузка dataset
+          │
+          ├─> Применение system prompt:
+          │   "You are a helpful reasoning assistant.
+          │    When given a problem, think through it step by step
+          │    and provide your answer in the following format:
+          │    <reasoning>...<answer>..."
+          │
+          └─> Форматирование для SFT:
+              {
+                "prompt": [
+                  {"role": "system", "content": system_prompt},
+                  {"role": "user", "content": question},
+                  {"role": "assistant", "content": formatted_response}
+                ]
+              }
+              где formatted_response =
+                "<reasoning>\n{solution}\n</reasoning>\n
+                 <answer>\n{answer}\n</answer>"
+
+4. НАСТРОЙКА LoRA
+   ┌─────────────────────────┐
+   │ FastLanguageModel.get_  │
+   │      peft_model         │
+   └──────┬──────────────────┘
+          │
+          └─> LoRA параметры:
+              - r: 64 (LoRA rank)
+              - lora_alpha: 128
+              - lora_dropout: 0
+              - target_modules: ["q_proj", "k_proj", "v_proj",
+                                 "o_proj", "gate_proj", "up_proj",
+                                 "down_proj"]
+              - bias: "none"
+              - use_gradient_checkpointing: True
+
+5. REWARD FUNCTIONS (для GRPO)
+   ┌──────────────────────────┐
+   │ match_format_exactly     │
+   └──────┬───────────────────┘
+          │
+          ├─> Проверка формата:
+          │   pattern = r"<reasoning>.*</reasoning>.*<answer>.*</answer>"
+          │
+          │   Награда:
+          │   - Правильный формат: +1.0
+          │   - Неправильный формат: -1.0
+          │
+          └─> Применяется к каждому completion
+
+6. ОБУЧЕНИЕ
+   ┌─────────────────────────┐
+   │ GRPOTrainer (или SFT)   │
+   └──────┬──────────────────┘
+          │
+          ├─> GRPO Training Config:
+          │   - learning_rate: 5e-6
+          │   - num_train_epochs: 1
+          │   - per_device_train_batch_size: 1
+          │   - gradient_accumulation_steps: 8
+          │   - max_prompt_length: 512
+          │   - max_completion_length: 1024
+          │   - num_generations: 4
+          │
+          ├─> Цикл обучения:
+          │   Для каждого батча:
+          │   ├─> Генерация K=4 completion'ов
+          │   ├─> Вычисление rewards
+          │   │   └─> match_format_exactly(completions)
+          │   ├─> Группировка по rewards
+          │   └─> Обновление весов (policy optimization)
+          │
+          └─> Сохранение чекпоинтов
+
+7. ОЦЕНКА МОДЕЛИ
+   ┌─────────────────────────┐
+   │ evaluate_model_aime     │
+   └──────┬──────────────────┘
+          │
+          ├─> Загрузка обученной модели
+          │
+          ├─> Генерация на AIME датасете
+          │   - temperature: 0.3
+          │   - n_sampling: 8
+          │   - max_tokens: 32768
+          │
+          └─> Расчет метрик:
+              - Accuracy
+              - Pass@k
+
+8. СОХРАНЕНИЕ МОДЕЛИ
+   ┌─────────────────────────┐
+   │ model.save_pretrained   │
+   │ (merged)                │
+   └──────┬──────────────────┘
+          │
+          ├─> Объединение LoRA весов с базовой моделью
+          │
+          ├─> Сохранение форматов:
+          │   ├─> merged_16bit (full precision)
+          │   ├─> merged_4bit (quantized)
+          │   └─> lora_adapters (only LoRA weights)
+          │
+          └─> Опциональный push to HuggingFace Hub
+```
+
+### Поток данных
+
+```
+ДАТАСЕТ              ОБРАБОТКА                МОДЕЛЬ
+───────              ─────────                ──────
+
+GSM8K        ──>  Format Prompts     ──>  Training Data
+questions         (system + user +        (with <reasoning>
+                   extracted answer)        <answer> tags)
+                         │
+                         ├──>  LoRA Training    ──>  Adapted Model
+                         │     (GRPO/SFT)            (base + LoRA)
+                         │
+LIMO         ──>  Format with        ──>  Training Data
+problems          full solutions          (complete conversations)
+                         │
+                         └──>  Evaluation       ──>  Metrics
+                               (AIME dataset)        (Accuracy, Pass@k)
+                                    │
+                                    └──>  Merge & Save   ──>  Final Model
+                                          (16bit/4bit)        (HF format)
+```
+
+### Reward Function Logic (GRPO)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   GRPO REWARD CALCULATION                │
+└─────────────────────────────────────────────────────────┘
+
+Для каждого completion:
+
+1. CHECK FORMAT
+   │
+   ├─> Ищем паттерн: <reasoning>...<answer>...
+   │
+   ├─> Если найден:
+   │   └─> reward += 1.0
+   │
+   └─> Если НЕ найден:
+       └─> reward -= 1.0
+
+2. CHECK CORRECTNESS (опционально)
+   │
+   ├─> Извлечь answer из <answer>...</answer>
+   │
+   ├─> Сравнить с ground truth
+   │
+   ├─> Если правильный:
+   │   └─> reward += 5.0
+   │
+   └─> Если неправильный:
+       └─> reward += 0.0
+
+3. GROUP BY REWARDS
+   │
+   ├─> Сортировка completions по rewards
+   │
+   └─> Разделение на группы:
+       - High reward group (top 50%)
+       - Low reward group (bottom 50%)
+
+4. POLICY OPTIMIZATION
+   │
+   └─> Увеличить вероятность high-reward completions
+       Уменьшить вероятность low-reward completions
+```
+
+### Конфигурация обучения
+
+| Параметр | SFT | GRPO | Описание |
+|----------|-----|------|----------|
+| learning_rate | 2e-4 | 5e-6 | GRPO требует меньший LR |
+| batch_size | 4 | 1 | GRPO использует меньший батч |
+| gradient_accumulation | 4 | 8 | Для эффективной памяти |
+| num_generations | - | 4 | Количество completion'ов |
+| max_prompt_length | - | 512 | Макс длина промпта |
+| max_completion_length | - | 1024 | Макс длина ответа |
+| LoRA rank | 64 | 64 | Размер адаптера |
+
+### Оценка результатов
+
+После обучения модель оценивается на AIME dataset:
+
+```
+Base Model     ──>  AIME Eval  ──>  Baseline Accuracy: ~15%
+
+Trained Model  ──>  AIME Eval  ──>  Improved Accuracy: ~25%
+(GRPO)
+                                     Improvement: +10%
+```
+
+### Форматы сохранения
+
+**1. LoRA Adapters Only:**
+```
+lora_adapters/
+├── adapter_config.json
+├── adapter_model.safetensors
+└── tokenizer files
+```
+
+**2. Merged 16-bit:**
+```
+merged_16bit/
+├── model.safetensors (или .bin)
+├── config.json
+├── tokenizer files
+└── generation_config.json
+```
+
+**3. Merged 4-bit:**
+```
+merged_4bit/
+├── model.safetensors (quantized)
+├── config.json
+├── quantization_config.json
+└── tokenizer files
+```
+
+---
+
