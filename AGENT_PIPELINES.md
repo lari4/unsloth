@@ -705,3 +705,330 @@ merged_4bit/
 
 ---
 
+## Vision OCR Pipeline
+
+### Описание
+Пайплайн для обучения и оценки Vision моделей на задачах OCR (Optical Character Recognition). Включает обучение на французском датасете OCR с оценкой качества через WER и CER метрики.
+
+### Компоненты
+
+**Основной класс:** `OCRModelEvaluator`
+**Расположение:**
+- Обучение: `tests/saving/vision_models/test_save_merge_vision_model_ocr_benchmark.py`
+- Оценка: `tests/utils/ocr_eval.py`
+**Модель:** Qwen2-VL-7B-Instruct
+
+### Схема работы
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        VISION OCR PIPELINE                           │
+└─────────────────────────────────────────────────────────────────────┘
+
+1. ЗАГРУЗКА ДАТАСЕТА
+   ┌──────────────────────────────────┐
+   │ load_dataset (HuggingFace)       │
+   └──────────┬───────────────────────┘
+              │
+              ├─> Dataset: "lbourdois/OCR-liboaccn-OPUS-MIT-5M-clean"
+              │   Language: "en"
+              │
+              ├─> Training split:
+              │   └─> range(2000) - первые 2000 примеров
+              │
+              └─> Evaluation split:
+                  └─> range(2000, 2200) - следующие 200 примеров
+
+2. ФОРМАТИРОВАНИЕ ДАННЫХ
+   ┌──────────────────┐
+   │ format_data      │
+   └────────┬─────────┘
+            │
+            └─> Структура для каждого примера:
+                {
+                  "messages": [
+                    {
+                      "role": "system",
+                      "content": [
+                        {"type": "text", "text": "You are an expert french ocr system."}
+                      ]
+                    },
+                    {
+                      "role": "user",
+                      "content": [
+                        {"type": "text", "text": question},
+                        {"type": "image", "image": PIL_Image}
+                      ]
+                    },
+                    {
+                      "role": "assistant",
+                      "content": [
+                        {"type": "text", "text": answer}
+                      ]
+                    }
+                  ]
+                }
+
+3. ИНИЦИАЛИЗАЦИЯ BASE MODEL
+   ┌──────────────────────────────┐
+   │ FastVisionModel.from_        │
+   │      pretrained              │
+   └──────────┬───────────────────┘
+              │
+              ├─> Модель: "unsloth/Qwen2-VL-7B-Instruct"
+              │   - max_seq_length: 2048
+              │   - load_in_4bit: True
+              │   - full_finetuning: False (используем LoRA)
+              │
+              └─> Base model evaluation:
+                  ├─> FastVisionModel.for_inference(model)
+                  ├─> OCR evaluation на eval_dataset
+                  └─> Сохранение baseline метрик (WER, CER)
+
+4. НАСТРОЙКА LoRA ДЛЯ VISION
+   ┌──────────────────────────────┐
+   │ FastVisionModel.get_peft_    │
+   │          model               │
+   └──────────┬───────────────────┘
+              │
+              └─> Vision LoRA параметры:
+                  - finetune_vision_layers: True
+                  - finetune_language_layers: True
+                  - finetune_attention_modules: True
+                  - finetune_mlp_modules: True
+                  - r: 16 (LoRA rank для vision)
+                  - lora_alpha: 32
+                  - lora_dropout: 0
+                  - bias: "none"
+                  - use_gradient_checkpointing: "unsloth"
+
+5. ОБУЧЕНИЕ
+   ┌──────────────────────────────┐
+   │ SFTTrainer (Vision)          │
+   └──────────┬───────────────────┘
+              │
+              ├─> Training Config:
+              │   - per_device_train_batch_size: 2
+              │   - gradient_accumulation_steps: 4
+              │   - max_steps: 60 (или num_train_epochs: 2)
+              │   - learning_rate: 2e-4
+              │   - max_grad_norm: 0.3
+              │   - warmup_ratio: 0.03
+              │   - optim: "adamw_torch_fused"
+              │
+              ├─> Data Collator:
+              │   └─> UnslothVisionDataCollator(model, tokenizer)
+              │       - Обработка vision_info (images)
+              │       - Создание attention masks
+              │       - Padding sequences
+              │
+              └─> Training Loop:
+                  Для каждого батча:
+                  ├─> Process vision info (images)
+                  ├─> Apply chat template
+                  ├─> Forward pass (vision + language)
+                  ├─> Compute loss
+                  └─> Backward pass + optimizer step
+
+6. ОЦЕНКА ПОСЛЕ ОБУЧЕНИЯ
+   ┌──────────────────────────────┐
+   │ OCRModelEvaluator.evaluate_  │
+   │          model               │
+   └──────────┬───────────────────┘
+              │
+              ├─> Для каждого примера в eval_dataset:
+              │   │
+              │   ├─> ГЕНЕРАЦИЯ:
+              │   │   ├─> Apply chat template
+              │   │   ├─> Process vision info
+              │   │   │   └─> process_vision_info(messages)
+              │   │   │       - Извлечение images/videos
+              │   │   │       - Обработка для модели
+              │   │   ├─> Create inputs:
+              │   │   │   processor(text, images, videos)
+              │   │   └─> Generate:
+              │   │       - max_new_tokens: 1024
+              │   │       - temperature: 1.5
+              │   │       - min_p: 0.1
+              │   │
+              │   ├─> РАСЧЕТ МЕТРИК:
+              │   │   ├─> WER (Word Error Rate):
+              │   │   │   └─> wer(ground_truth, generated)
+              │   │   └─> CER (Character Error Rate):
+              │   │       └─> cer(ground_truth, generated)
+              │   │
+              │   └─> СОХРАНЕНИЕ:
+              │       ├─> Individual result (sample_N.txt)
+              │       └─> Record for summary
+              │
+              └─> SUMMARY:
+                  ├─> Average WER
+                  ├─> Average CER
+                  ├─> Detailed results CSV
+                  └─> Metrics file
+
+7. СРАВНЕНИЕ МОДЕЛЕЙ
+   ┌──────────────────────────────┐
+   │ OCRModelEvaluator.print_     │
+   │    model_comparison          │
+   └──────────┬───────────────────┘
+              │
+              ├─> Сравнительная таблица:
+              │   Model          WER      CER
+              │   ------------------------------------
+              │   Base Model     0.245    0.123
+              │   LoRA Model     0.187    0.089
+              │   Merged 16bit   0.185    0.088
+              │   Merged 4bit    0.189    0.091
+              │
+              └─> Визуализация:
+                  ├─> Bar charts (WER & CER)
+                  └─> Сохранение: ocr_model_comparison.png
+
+8. СОХРАНЕНИЕ МОДЕЛИ
+   ┌──────────────────────────────┐
+   │ model.save_pretrained_merged │
+   └──────────┬───────────────────┘
+              │
+              ├─> Форматы:
+              │   ├─> merged_16bit/ (Vision + Language)
+              │   ├─> merged_4bit/ (quantized)
+              │   └─> gguf/ (опционально)
+              │
+              └─> Push to Hub (опционально):
+                  model.push_to_hub_merged(
+                      "username/model-name",
+                      save_method="merged_16bit"
+                  )
+```
+
+### Поток данных
+
+```
+ВХОД                     ОБРАБОТКА                  ВЫХОД
+────                     ─────────                  ─────
+
+Image (PIL)     ──>  Vision Encoder        ──>  Image Features
++ Question           (Qwen2-VL)                 (embeddings)
+                            │
+                            ├─>  Vision-Language   ──>  Contextual
+                            │    Fusion                 Features
+                            │    (attention)
+                            │
+Text Tokens     ──>  Language Model        ──>  Text Features
+(question)           (Qwen2)                    (embeddings)
+                            │
+                            └─>  Generation        ──>  OCR Output
+                                 (autoregressive)       (text)
+                                       │
+                                       └─>  Metrics       ──>  WER, CER
+                                            (jiwer)
+```
+
+### Метрики оценки
+
+**1. WER (Word Error Rate):**
+```
+WER = (Substitutions + Insertions + Deletions) / Total Words in Reference
+
+Пример:
+Reference:  "Le chat est noir"
+Generated:  "Le chien est noire"
+
+WER = (1 substitution + 0 insertions + 0 deletions + 1 substitution) / 4
+    = 2 / 4 = 0.5 (50%)
+```
+
+**2. CER (Character Error Rate):**
+```
+CER = (Substitutions + Insertions + Deletions) / Total Characters in Reference
+
+Пример:
+Reference:  "Le chat"
+Generated:  "Le chien"
+
+CER = (edit distance) / len(reference)
+```
+
+**Интерпретация:**
+- **Excellent**: WER < 0.05, CER < 0.02
+- **Good**: WER < 0.10, CER < 0.05
+- **Fair**: WER < 0.20, CER < 0.10
+- **Poor**: WER > 0.20, CER > 0.10
+
+### Конфигурация Vision Training
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| model | Qwen2-VL-7B-Instruct | Base vision-language model |
+| max_seq_length | 2048 | Макс длина последовательности |
+| batch_size | 2 | Размер батча (vision требует больше памяти) |
+| gradient_accumulation | 4 | Эффективный batch_size = 2*4 = 8 |
+| learning_rate | 2e-4 | Стандартный для LoRA |
+| max_steps | 60 | Или num_train_epochs: 2 |
+| LoRA rank (r) | 16 | Меньше чем для language-only |
+| lora_alpha | 32 | ratio = alpha/r = 2.0 |
+| temperature (inference) | 1.5 | Выше для разнообразия OCR |
+| min_p (inference) | 0.1 | Minimum probability threshold |
+
+### Data Collator для Vision
+
+```python
+UnslothVisionDataCollator процесс:
+
+1. Для каждого примера:
+   │
+   ├─> Применить chat template
+   │   text = processor.apply_chat_template(
+   │       messages, add_generation_prompt=True
+   │   )
+   │
+   ├─> Обработать vision info
+   │   image_inputs, video_inputs = process_vision_info(messages)
+   │
+   ├─> Создать inputs
+   │   inputs = processor(
+   │       text=[text],
+   │       images=image_inputs,
+   │       videos=video_inputs,
+   │       padding=True
+   │   )
+   │
+   └─> Создать labels
+       └─> Маскировать промпт, оставить только ответ для loss
+```
+
+### Сравнение результатов
+
+Типичные улучшения после fine-tuning:
+
+```
+МЕТРИКА         BASE MODEL    AFTER TRAINING    IMPROVEMENT
+─────────────────────────────────────────────────────────────
+WER              24.5%           18.7%            -23.7%
+CER              12.3%            8.9%            -27.6%
+
+Training time: ~30 minutes (60 steps, batch_size=2)
+```
+
+### Model Formats
+
+**1. Vision Model Structure:**
+```
+vision_model/
+├── config.json
+│   ├── vision_config (ViT parameters)
+│   └── text_config (Language model parameters)
+├── model.safetensors (или sharded)
+├── preprocessor_config.json (image processing)
+├── processor_config.json
+└── tokenizer files
+```
+
+**2. Merged Vision Model:**
+- Объединяет LoRA веса с базовой моделью
+- Включает как vision, так и language компоненты
+- Размер: ~14GB (16-bit), ~7GB (4-bit)
+
+---
+
