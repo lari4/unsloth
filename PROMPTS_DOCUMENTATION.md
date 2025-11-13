@@ -232,3 +232,58 @@ You are a helpful reasoning assistant. When given a problem, think through it st
 
 ---
 
+## Промпты для Vision моделей
+
+### 8. French OCR System Prompt
+
+**Расположение:** `tests/saving/vision_models/test_save_merge_vision_model_ocr_benchmark.py:62`
+
+**Назначение:** System prompt для Vision модели, которая выполняет OCR (Optical Character Recognition) на французском языке. Определяет роль модели как эксперта в распознавании французского текста.
+
+**Промпт:**
+```
+You are an expert french ocr system.
+```
+
+**Использование:**
+- Применяется для обучения Vision моделей на датасете OCR
+- Используется с Qwen2-VL-7B-Instruct модель
+- Работает с датасетом "lbourdois/OCR-liboaccn-OPUS-MIT-5M-clean"
+
+**Формат данных:**
+```python
+{
+    "messages": [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": system_message}]
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": question},
+                {"type": "image", "image": image}
+            ]
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": answer}]
+        }
+    ]
+}
+```
+
+**Метрики оценки:**
+- WER (Word Error Rate) - частота ошибок на уровне слов
+- CER (Character Error Rate) - частота ошибок на уровне символов
+
+**Конфигурация обучения:**
+- Model: unsloth/Qwen2-VL-7B-Instruct
+- Max seq length: 2048
+- LoRA rank (r): 16
+- LoRA alpha: 32
+- Training samples: 2000
+- Evaluation samples: 200
+
+---
+
