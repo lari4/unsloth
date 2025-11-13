@@ -151,3 +151,84 @@ Solve this step by step and provide your final numerical answer.
 
 ---
 
+## Промпты для обучающих датасетов
+
+### 6. GSM8K Dataset System Prompt
+
+**Расположение:** `tests/saving/language_models/test_save_merged_grpo_model.py:112-116`
+
+**Назначение:** System prompt для форматирования датасета GSM8K для обучения модели. Инструктирует модель размещать процесс мышления между специальными тегами `<reasoning>` и предоставлять финальное численное решение между тегами `<answer>`.
+
+**Промпт:**
+```
+You are given a problem. Think about the problem and reason step by step. Place your thinking process between <reasoning> and </reasoning>. Then, provide your final numerical solution between <answer></answer>
+```
+
+**Использование:**
+- Применяется в функции `prepare_gsm8k_dataset`
+- Используется для форматирования задач GSM8K
+- Работает с GRPO (Group Relative Policy Optimization) обучением
+
+**Формат данных:**
+```python
+{
+    "prompt": [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question}
+    ],
+    "answer": extracted_answer
+}
+```
+
+**Теги форматирования:**
+- `<reasoning>...</reasoning>` - процесс размышления
+- `<answer>...</answer>` - финальный численный ответ
+
+---
+
+### 7. LIMO Dataset System Prompt
+
+**Расположение:** `tests/saving/language_models/test_save_merged_grpo_model.py:134-141`
+
+**Назначение:** System prompt для форматирования датасета LIMO для SFT (Supervised Fine-Tuning) обучения. Более подробный промпт, который объясняет ассистенту формат ответа с примерами тегов.
+
+**Промпт:**
+```
+You are a helpful reasoning assistant. When given a problem, think through it step by step and provide your answer in the following format:
+
+<reasoning>
+[Your detailed step-by-step reasoning and solution process]
+</reasoning>
+<answer>
+[Your final numerical answer]
+</answer>
+```
+
+**Использование:**
+- Применяется в функции `prepare_limo_dataset`
+- Используется для SFT training
+- Создает более структурированный формат с разделением reasoning и answer
+
+**Формат данных:**
+```python
+{
+    "prompt": [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": formatted_response}
+    ]
+}
+```
+
+**Assistant response format:**
+```
+<reasoning>
+{solution}
+</reasoning>
+<answer>
+{answer}
+</answer>
+```
+
+---
+
